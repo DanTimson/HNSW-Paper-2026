@@ -1,0 +1,28 @@
+# vendored upstream (re-clone via scripts/setup_vendor.sh; unlicensed upstream)
+vendor_repo/
+
+# experiment outputs / caches
+.ngmbench_cache*/
+.hnswmerger_work*/
+.hnswmerger_work/
+*.hnsw
+*.hnsw.meta.json
+# results*.jsonl
+!sample_results.jsonl
+
+# datasets (download locally; large)
+data/
+
+docs/paper/
+
+scripts/smoke.py
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+tests/
