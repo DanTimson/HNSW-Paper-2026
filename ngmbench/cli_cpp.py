@@ -1,7 +1,11 @@
-"""
-CLI: run an HNSWMerger (C++) sweep and append records to the shared results log.
+"""CLI: run an HNSWMerger (C++) sweep and append records to the shared results log.
 
     python -m ngmbench.cli_cpp --config config/sift1m_cpp.json
+
+Records share the schema the Python harness writes, so the same playground shows
+both. C++ runs carry build_calc + merge_calc (distance counts) and a recall_curve
+over efs. Leaf indexes are reused if already on disk; runs already in the results
+log (matched by run_key) are skipped.
 """
 from __future__ import annotations
 
@@ -10,8 +14,11 @@ import hashlib
 import itertools
 import json
 import os
+import time
 
 from .cache import ResultsLog
+from dataclasses import replace
+
 from .index.hnswmerger import CppParams, Paths, run_hnswmerger
 
 
@@ -45,32 +52,63 @@ def main(argv=None):
         M=hp.get("M", 16), ef_construction=hp.get("ef_construction", 200),
         k=ev.get("k", 10), kk=ev.get("kk", 100), nq=ev.get("nq", 10000),
         efs_array=ev.get("efs_array", [10, 50, 100, 200]),
+        thread=conf.get("threads", 1),
+        cleanup_merged=bool(conf.get("cleanup_merged", False)),
     )
 
     results = ResultsLog(conf.get("results_path", "results.jsonl"))
+    os.makedirs(os.path.dirname(results.path) or ".", exist_ok=True)
     done = {r.get("run_key") for r in results.load_all()}
 
     runs = []
     for spec in conf.get("sweep", []):
         for s in expand(spec):
-            runs.append((s["algo"], int(s["n_parts"]), s.get("order", "balanced")))
+            runs.append((
+                s["algo"],
+                int(s["n_parts"]),
+                s.get("order", "balanced"),
+                s.get("params", {}),
+                s.get("label"),
+            ))
 
     print(f"{len(runs)} C++ run(s) -> {results.path}")
-    for i, (algo, n_parts, order) in enumerate(runs, 1):
-        key = _run_key({"b": "hnswmerger", "ds": ds["name"], "algo": algo,
-                        "np": n_parts, "order": order, "M": params.M,
-                        "efc": params.ef_construction, "nb": params.nb})
+    for i, (algo, n_parts, order, mp, label) in enumerate(runs, 1):
+        p = replace(params, **mp) if mp else params
+        kd = {"b": "hnswmerger", "ds": ds["name"], "algo": algo,
+              "np": n_parts, "order": order, "M": p.M,
+              "efc": p.ef_construction, "nb": p.nb}
+        if mp:                      # gated: sweeps without a params key keep their
+            kd["mp"] = mp           # existing keys, so finished runs stay cached
+        key = _run_key(kd)
         if key in done:
             print(f"[{i}/{len(runs)}] skip (cached) {algo} parts={n_parts} {order}")
             continue
-        rec = run_hnswmerger(algo, n_parts, order, paths, params)
+        started = time.perf_counter()
+        rec = run_hnswmerger(algo, n_parts, order, paths, p)
+        rec["run_wall_seconds"] = time.perf_counter() - started
         rec["run_key"] = key
         rec["dataset"] = ds["name"]
+        rec["params"] = p.merge_id()      # resolved values, defaults included
+        rec["threads"] = p.thread
+        # Optional reproducibility metadata for experiments that record it.
+        # Gated so established configs and cached run identities remain unchanged.
+        if "seed_metadata" in conf:
+            rec["seed_metadata"] = conf["seed_metadata"]
+        if "experiment_metadata" in conf:
+            rec["experiment_metadata"] = conf["experiment_metadata"]
+            rec["experiment_config"] = {
+                "dataset": ds, "hnsw": hp, "eval": ev,
+                "workdir": paths.workdir,
+            }
+            rec["config_path"] = os.path.abspath(args.config)
+        if label:
+            rec["variant"] = label
+        rec["exps_sha"] = hashlib.sha1(open(paths.exps_bin, "rb").read()).hexdigest()[:12]
         results.append(rec)
-        r = rec.get(f"recall@{params.k}")
+        r = rec.get(f"recall@{p.k}")
         print(f"[{i}/{len(runs)}] {algo:10} parts={n_parts} {order:10} "
               f"build_calc={rec['build_calc']} merge_calc={rec['merge_calc']} "
-              f"recall@{params.k}={r}")
+              f"recall@{p.k}={r}")
 
 
 if __name__ == "__main__":

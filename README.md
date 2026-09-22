@@ -1,116 +1,213 @@
-# Fast Navigable Graph Construction by Merge Operation — reproduction code
+# CoursePaper2026 — Fast Navigable Graph Construction by Merge Operation
 
-Code, configs, and figure pipeline behind the course paper *"Fast Navigable Graph
-Construction by Merge Operation"* (RU: «Быстрое построение навигационных графов используя операцию объединения»). It reproduces the SIFT1M / GIST1M comparison of HNSW construction by graph **merge** — divide-and-conquer over the NGM / IGTM / CGTM / ES family, plus a `TWO_MERGE` variant and an insertion baseline — against **NN-Descent**.
+Experiment harness and evidence base for the HSE Nizhny Novgorod master's
+course paper *«Быстрое построение навигационных графов, используя операцию
+объединения»* (advisor A. A. Ponomarenko). It measures the computational
+cost of obtaining an HNSW navigable graph three different ways and how that
+cost trades off against search quality.
 
-## What this reproduces
+The Python package is `ngmbench` (see `pyproject.toml`): an experiment
+harness for navigable-graph construction by merge (NGM/IGTM/CGTM/SIGM/
+HNSW-Merger) versus NN-Descent-based construction (Layerwise NN-Descent,
+FastHNSW).
 
+The full results and methodology summary is [`docs/RESULTS.md`](docs/RESULTS.md).
 
-- **distance-computation counts** (`build_calc` / `merge_calc` / `total_calc`) for the   merge family on full SIFT1M and GIST1M — the language-independent cost metric;
-- **recall@10** and the **recall-vs-`ef` curve** under greedy search;
-- **build / merge wall-clock**;
-- the **NN-Descent baseline** (recall + wall-clock; its distance count is `null` by
-  design — see *Interpreting the logs*).
+## What is being compared
 
-Results accumulate in JSONL logs; `make_figures.py` turns them into the per-dataset figure sets under `docs/figures/{sift1m,gist1m}/`.
+Three ways of obtaining an HNSW index, all measured by the same metric — a
+counter incremented on every squared-L2 distance computation, so results are
+comparable across methods and independent of hardware:
+
+1. **Monolithic HNSW** — ordinary sequential insertion (`ngmbench/cli_build_budget.py`).
+2. **Partition + merge ("divide and conquer")** — split the data into `P`
+   parts, build an HNSW subindex over each part independently, then merge
+   pairwise using one of five algorithms: NGM, IGTM, CGTM, SIGM, or
+   HNSW-Merger (`ngmbench/cli_cpp.py`, backed by a patched external
+   [HNSWMerger](https://github.com/Kimchuls/HNSWMerger)).
+3. **Layerwise NN-Descent / FastHNSW** — replace sequential insertion with
+   iterative neighbor refinement (NN-Descent) per HNSW layer, either as a
+   single candidate-generation pass (Layerwise) or with full KCNA refinement
+   at every layer (FastHNSW), both backed by an external
+   [FastKCNA](https://github.com/xdyangsh/FastKCNA)/KGraph build
+   (`ngmbench/cli_layerwise_nnd.py`, `ngmbench/cli_fasthnsw.py`,
+   `ngmbench/cli_fastkcna.py`).
+
+Cost is reported as raw distance-evaluation counts, and quality as Recall@10
+/ `d_s@0.95` (distance evaluations per query needed to reach recall 0.95).
+Wall-clock time is recorded but treated as a secondary metric, since the
+three backends allocate memory and do bookkeeping differently.
+
+## Repository layout
+
+- **`ngmbench/`** — the installable Python package: CLI entry points
+  (`cli_cpp`, `cli_build_budget`, `cli_fastkcna`, `cli_fasthnsw`,
+  `cli_layerwise_nnd`, `cli_layerwise_nnd_quality`), index-builder wrappers
+  under `ngmbench/index/` (one module per backend), plus `distance.py`,
+  `quality.py`, `cache.py`, `config.py`, `prepare_bigann.py`.
+- **`cpp/`** — the C++ side: patches/instrumentation applied on top of the
+  external HNSWMerger checkout (`experiment.cpp`, `dump_graph_level0.cpp`),
+  the standalone Layerwise NN-Descent builder and validator, the FastHNSW
+  quality evaluator, a `Makefile`, and per-backend provenance/accounting
+  notes (`FASTKCNA.md`, `FASTKCNA_DISTANCE_ACCOUNTING.md`,
+  `FASTHNSW_QUALITY_EVALUATION.md`, `HNSWMERGER_PROVENANCE.md`,
+  `LAYERWISE_NND_HNSW.md`) plus its own `README.md` with build instructions.
+- **`scripts/`** — dataset prep (`get_data.sh`, `prepare_dataset.py`),
+  figure generation (`make_figures.py`, `make_overall_figures.py`,
+  `make_constructor_figures.py`), analysis (`analyse_trends.py`,
+  `graph_structure.py`, `xval_python_ref.py` — cross-checks against
+  Ponomarenko's reference `merge_hnsw.py`), and smoke/validation scripts for
+  the FastKCNA backend.
+- **`config/`** — 51 JSON run configs: one per dataset/scale sweep
+  (`bigann*`, `deep*`, `gist*`, `turing*` at 10K–10M), build-budget configs,
+  and per-backend canonical/quality configs for FastKCNA, FastHNSW, and
+  layerwise NN-Descent.
+- **`results/`** — 42 JSONL evidence files, one family per experiment
+  (partition sweeps, total-cost sweeps, layerwise/FastHNSW canonical and
+  quality runs, monolithic quality baselines, etc.). This is the raw
+  evidence all figures and tables are generated from.
+- **`docs/`** — results, methodology, and reproduction notes (see Further reading below)
+  plus generated figures under `docs/figures/`. Some subdirectories there
+  (`_components`, `_cross`, `_scale`, `structure`, `synthetic_n1500_d16`,
+  `trends`) are exploratory/historical and not part of the current reported
+  result set — `sift1m/`, `bigann1m/`, `gist1m/`, `partition/`, `overall/`,
+  and `constructors/` are the current ones.
+- **`tests/`** — pytest suite (10 files) covering the CLIs, index wrappers,
+  quality evaluation, and figure-generation scripts.
+- Top-level files: `pyproject.toml` / `requirements.txt` (see Setup),
+  `.env.example` (copy to `.env`), `c_leaf.csv` (an example leaf-graph
+  structure CSV consumed by `scripts/graph_structure.py`), and
+  `hnswmerger.patch` (an already-applied historical diff, kept for the
+  record rather than as something to re-apply).
+
+## External dependencies (not vendored)
+
+Two C++ backends are cloned and built outside this repository:
+
+- **HNSWMerger** (Jin et al., *Efficient Vector Index Merging in Vector
+  Databases*, PACMMOD 4(1) art. 31), licensed Apache-2.0 upstream — build via
+  [`cpp/README.md`](cpp/README.md). It is not vendored here even so: the
+  pinned base commit, the exact diff, and the rebuild instructions in
+  [`cpp/HNSWMERGER_PROVENANCE.md`](cpp/HNSWMERGER_PROVENANCE.md) are enough
+  for reproducibility.
+- **FastKCNA/KGraph** — build via [`cpp/FASTKCNA.md`](cpp/FASTKCNA.md).
+  Backs both FastHNSW and the layerwise NN-Descent constructor.
 
 ## Setup
 
-- Python ≥ 3.10
-- A C++ toolchain (`g++` with OpenMP) for the merge backend
-- ~4 GB free disk for the datasets (more for GIST)
-
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[playground]"      # core deps + the Streamlit results browser
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .          # installs ngmbench per pyproject.toml
+# or, for the lighter analysis-only path with no C++ backend work:
+pip install -r requirements.txt
+
+cp .env.example .env      # then fill in HNSWMERGER_BIN / FASTKCNA_ROOT
+                           # once the two backends above are built
 ```
 
-### Datasets
+Datasets: `scripts/get_data.sh` fetches and extracts SIFT1M and GIST1M from
+[TEXMEX](http://corpus-texmex.irisa.fr/) (`--sift`, `--gist`, or `--all`).
+Deep1M and Turing1M are 1M-vector prefixes cut from the Big-ANN-Benchmarks
+Deep1B / MSTuring1B base files via `scripts/prepare_dataset.py --dataset
+deep|turing ...` — those base files are not fetched by `get_data.sh` and
+need to be obtained separately first.
+
+## Running experiments
+
+Full copy-paste commands (including the total-cost merge experiment and the
+layerwise NN-Descent baseline runs) live in
+[`docs/REPRODUCING_EXPERIMENTS.md`](docs/REPRODUCING_EXPERIMENTS.md). In
+short:
+
+- **Monolithic build budget**: `python -m ngmbench.cli_build_budget --config config/build_budget_*.json`
+- **Merge algorithms**: `python -m ngmbench.cli_cpp --config config/<dataset>_sweep.json` (or `config/total_cost_*.json` for the full build+merge+quality pipeline)
+- **Layerwise NN-Descent**: `python -m ngmbench.cli_layerwise_nnd --config config/layerwise_nnd_hnsw_canonical_<dataset>.json`, then `ngmbench.cli_layerwise_nnd_quality` against the resulting run key
+- **FastHNSW / FastKCNA**: `python -m ngmbench.cli_fasthnsw` / `ngmbench.cli_fastkcna --config config/fasthnsw_quality_<dataset>.json` etc.
+
+## Figures
+
+- `scripts/make_figures.py` — merge cost by algorithm, cross-dataset
+  generalization, partition scaling (`docs/figures/<dataset>/`).
+- `scripts/make_overall_figures.py` — recursive end-to-end merge-tree
+  scaling (`docs/figures/overall/`).
+- `scripts/make_constructor_figures.py` — monolithic vs. Layerwise
+  NN-Descent vs. FastHNSW comparison (`docs/figures/constructors/`);
+  canonical-evidence-only selection, see
+  `docs/RESULTS.md`.
+
+## Tests
 
 ```bash
-scripts/get_data.sh --all           # SIFT ~168 MB, GIST ~2.6 GB; or --sift / --gist
+pytest -q
 ```
 
-### Build the merge backend 
+63 passed, 2 skipped.
 
-The merge-family numbers come from the [HNSWMerger](https://github.com/Kimchuls/HNSWMerger) C++ tool, which implements NGM / IGTM / CGTM, the Elasticsearch-style merge, and the rebuild/insert baselines in one codebase.
+## Current headline results
 
-```bash
-git clone https://github.com/Kimchuls/HNSWMerger.git
-cd HNSWMerger/HNSW-Merger
-make build && make exp              # produces ./builds and ./exps
+All figures are distance-evaluation counts (squared L2), not wall-clock.
 
-# GIST1M is not a built-in workload — patch the config and force a clean rebuild:
-python /path/to/this-repo/scripts/patch_hnswmerger_gist.py test_config.h
-make clean && make build && make exp
-```
+**Merge cost, SIFT1M, P=2** (one pairwise merge, no accumulated tree effect):
 
-### Merge family, full scale (C++)
+| Algorithm   | Merge cost, B distance evals | Share of monolithic build |
+|-------------|------------------------------:|---------------------------:|
+| HNSW-Merger | 0.194                         | 5.2%                        |
+| IGTM        | 0.447                         | 12.0%                       |
+| CGTM        | 0.575                         | 15.4%                       |
+| NGM         | 0.578                         | 15.5%                       |
+| SIGM        | 1.991                         | 53.5%                       |
 
-Edit the `binaries` and `dataset` paths in `config/sift1m_cpp.json` and
-`config/gist1m_cpp.json` to point at your `./builds`, `./exps`, and the data files,
-then:
+IGTM is cheapest of NGM/IGTM/CGTM on all four datasets (SIFT1M, Deep1M,
+Turing1M, GIST1M); SIGM is always most expensive. HNSW-Merger is tracked
+only as an external reference point — it reuses existing edges rather than
+merging graph structure, so its low cost isn't directly comparable.
 
-```bash
-python -m ngmbench.cli_cpp --config config/sift1m_cpp.json    # -> results_cpp.jsonl
-python -m ngmbench.cli_cpp --config config/gist1m_cpp.json    # -> results_gist_cpp.jsonl
-```
+**Partition scaling, SIFT1M**: leaf-build savings grow from 7.4% (P=2) to
+28.7% (P=16), but for NGM/IGTM/CGTM the merge overhead already exceeds that
+saving at P=2. Only HNSW-Merger stays cheaper than monolithic construction
+across the full P range (2.2%–9.0% advantage) — the others may still win on
+wall-clock via parallel leaf construction, but not on total operation count.
 
-Each runs the sweep `NGM/IGTM/CGTM × {2,4,8} partitions`, `ES`/`TWO_MERGE × {2}`,
-`INSERT × {1}`, at `M = 16`, `ef_construction = 200`, evaluated at `k = 10` over the
-`ef` sweep `[10, 50, 100, 200, 400]`.
+**Constructor comparison, 1M vectors**:
 
-### NN-Descent baseline (Python / pynndescent)
+| Method                    | Construction, B distance evals | d_s@0.95 |
+|---------------------------|--------------------------------:|---------:|
+| Monolithic HNSW           | 3.7226                          | 1218.35  |
+| Layerwise NN-Descent HNSW | 3.3142 (−10.97%)                | 1389.41 (+14.04%) |
+| FastHNSW pg2              | 9.8381 (+164.3%)                | 1200.04 (≈ monolithic) |
 
-`config/sift1m.json` ships with `base_limit = 100000` for a quick subset — **set it to
-`1000000` (or remove it) to reproduce the full-scale baseline**.
+Layerwise NN-Descent trades cheaper construction for costlier search;
+FastHNSW trades much costlier construction for search efficiency close to
+monolithic. Neither is a universal win.
 
-```bash
-python -m ngmbench.cli --config config/sift1m.json            # -> results_sift.jsonl
-python -m ngmbench.cli --config config/gist1m.json            # -> results_gist.jsonl  (dim 960; RAM-heavy, ~tens of min)
-```
+## Known limitations
 
-### Figures
+- Distance-evaluation counts are comparable as *the same physical unit*
+  across backends (one squared-L2 call), but that is not equivalence of
+  total CPU/memory/wall-clock work — the three backends spend that unit
+  through structurally different code paths.
+- The four-dataset generalization claim (SIFT1M/Deep1M/Turing1M/GIST1M)
+  covers the merge-algorithm family only. Layerwise NN-Descent and FastHNSW
+  have only ever been run on SIFT, at 10K/100K/1M — never on the other three
+  datasets.
+- The 10K→100K→1M layerwise scaling trend (~8.4–8.7× per decade) is reported
+  as a finite-range measurement, not an asymptotic complexity claim — three
+  points don't support one.
+- SIGM is intentionally excluded from the P>2 total-cost matrix; see
+  `docs/REPRODUCING_EXPERIMENTS.md` for why.
+- The real wall-clock benefit of parallel leaf construction in the
+  divide-and-conquer scheme has not actually been measured, only the
+  operation count.
+## Further reading
 
-```bash
-python scripts/make_figures.py \
-  --results results_cpp.jsonl results_sift.jsonl results_gist_cpp.jsonl results_gist.jsonl \
-  --out docs/figures
-```
-
-Writes, per dataset, `merge_cost`, `partition_scaling`, `recall_vs_qps`,
-`construction_time`, `recall_vs_buildtime` (PNG + PDF) and `summary.csv` to
-`docs/figures/{sift1m,gist1m}/`. Rows are grouped by their `dataset` field, so SIFT
-and GIST never mix.
-
-### Browse results 
-
-```bash
-cat results*.jsonl > results_all.jsonl                        # combine the logs (de-duped on run_key)
-streamlit run app/playground.py -- --results results_all.jsonl
-```
-
-Use the sidebar **Dataset** filter to view one dataset at a time.
-
-## Settings for reproducibility
-
-- HNSW `M = 16`, `ef_construction = 200`; eval `k = 10`; `ef` sweep `[10,50,100,200,400]`.
-- Query-set size `nq`: 10000 (SIFT), 1000 (GIST) — read per row from the log.
-- C++ partitions are **contiguous id-ranges** (HNSWMerger's own scheme), not the Python side's random/k-means splits.
-
-## Interpreting the logs
-
-Key fields: `builder`, `algo`, `dataset`, `n_parts`, `dim`, `n`, `m`, `ef_construction`, `build_calc`, `merge_calc`, `total_calc`, `build_seconds`, `merge_seconds`, `recall@10`, `recall_curve[]`, `run_key`.
-
-- **Compare merge algorithms by `merge_calc`, not `total_calc`** — the build cost is shared across algorithms at a given partition count and would swamp the signal.
-- **`TWO_MERGE` reports `merge_calc = 0`** (it is not routed through the distance counter) — it is excluded from distance plots but kept for time and recall.
-- **NN-Descent has `build_calc` / `merge_calc` / `total_calc` = `null`** by design:   `pynndescent` is Numba-compiled and exposes no count comparable to the merge   family, so its honest axis is recall vs wall-clock.
-- On a `run_key` collision the **last** occurrence wins, so a re-run supersedes an
-  earlier row without hand-pruning.
-
-## Sources
-
-Merge backend: [HNSWMerger](https://github.com/Kimchuls/HNSWMerger) (Kimchuls,
-Apache-2.0). Merge algorithms: A. Ponomarenko, *Three Algorithms for Merging
-Hierarchical Navigable Small World Graphs*, arXiv:2505.16064. NN-Descent via
-`pynndescent`. Datasets: TEXMEX SIFT1M / GIST1M
+- [`docs/RESULTS.md`](docs/RESULTS.md) — full results and methodology
+  summary: methods, headline numbers, generated figures/tables, and what
+  the numbers do and don't support.
+- [`cpp/HNSWMERGER_PROVENANCE.md`](cpp/HNSWMERGER_PROVENANCE.md),
+  [`cpp/FASTKCNA_DISTANCE_ACCOUNTING.md`](cpp/FASTKCNA_DISTANCE_ACCOUNTING.md),
+  [`cpp/LAYERWISE_NND_HNSW.md`](cpp/LAYERWISE_NND_HNSW.md),
+  [`cpp/FASTHNSW_QUALITY_EVALUATION.md`](cpp/FASTHNSW_QUALITY_EVALUATION.md)
+  — backend-specific provenance and accounting notes.
+- [`docs/REPRODUCING_EXPERIMENTS.md`](docs/REPRODUCING_EXPERIMENTS.md) —
+  exact, copy-paste commands for the total-cost experiment and the
+  layerwise NN-Descent canonical runs.

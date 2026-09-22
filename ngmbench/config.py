@@ -1,5 +1,8 @@
-"""
-Experiment configuration
+"""Experiment configuration and stable hashing for stage caching.
+
+A config hashes to a stable hex digest; the cache keys built artifacts on the
+digests of the config slices they depend on, so an unchanged stage is skipped on
+rerun.
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ class DatasetCfg:
     n_clusters: int = 8
     n_queries: int = 100
     gt_k: int = 10
-    # real-dataset file paths
+    # real-dataset file paths (used when name != "synthetic")
     base_path: Optional[str] = None
     query_path: Optional[str] = None
     gt_path: Optional[str] = None
@@ -36,11 +39,11 @@ class HNSWParams:
 
 @dataclass
 class MergeCfg:
-    algo: str = "IGTM" # NGM | IGTM | CGTM
+    algo: str = "IGTM"               # NGM | IGTM | CGTM
     n_parts: int = 4
-    partition_method: str = "random" # random | kmeans
-    order: str = "balanced" # balanced | sequential
-    params: dict = field(default_factory=dict)
+    partition_method: str = "random"  # random | kmeans
+    order: str = "balanced"           # balanced | sequential
+    params: dict = field(default_factory=dict)   # per-algo merge kwargs
 
 
 @dataclass
@@ -56,9 +59,9 @@ class ExperimentCfg:
     merge: MergeCfg = field(default_factory=MergeCfg)
     eval: EvalCfg = field(default_factory=EvalCfg)
     seed: int = 0
-    builder: str = "merge" # merge | sigm | nndescent
+    builder: str = "merge"            # merge | sigm | nndescent
 
-    # hashing helpers
+    # ---- hashing helpers -------------------------------------------------- #
     def _digest(self, obj) -> str:
         blob = json.dumps(obj, sort_keys=True, default=str).encode()
         return hashlib.sha1(blob).hexdigest()[:12]

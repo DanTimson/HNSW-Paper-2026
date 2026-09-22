@@ -1,28 +1,38 @@
-# vendored upstream (re-clone via scripts/setup_vendor.sh; unlicensed upstream)
-vendor_repo/
-
-# experiment outputs / caches
-.ngmbench_cache*/
-.hnswmerger_work*/
-.hnswmerger_work/
-*.hnsw
-*.hnsw.meta.json
-# results*.jsonl
-!sample_results.jsonl
-
-# datasets (download locally; large)
+# --- datasets (download locally via scripts/get_data.sh; large) ---
 data/
 
-docs/paper/
+# --- external C++ checkouts (clone per cpp/README.md) ---
+vendor_repo/
+HNSWMerger/
 
-scripts/smoke.py
+# --- experiment caches & scratch (regenerable) ---
+.work_*/
+# Local/generated benchmark work directories
+.*_work*/
+.ngmbench_cache*/
+*.pkl
+*.cfg
+*.out
+dumps/
 
-# python
+# --- built C++ binaries ---
+cpp/exps
+cpp/builds
+cpp/dump_graph
+cpp/fast_hnsw_quality_eval
+cpp/fast_hnsw_query_counter_test
+cpp/layerwise_nnd_hnsw_builder
+cpp/layerwise_nnd_hnsw_validate
+*.o
+
+# --- local env (machine-specific paths; copy from .env.example) ---
+.env
+
+# --- python ---
 __pycache__/
 *.pyc
 .venv/
 venv/
 *.egg-info/
 .pytest_cache/
-
-tests/
+big-ann-benchmarks/

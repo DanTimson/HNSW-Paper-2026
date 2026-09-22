@@ -1,3 +1,8 @@
+"""Content-addressed stage cache and a tidy results log.
+
+Artifacts live under ``cache_dir`` keyed by stage + digest. A present file means
+the stage is done; reruns skip it. Results are appended to the log named by the config's results_path.
+"""
 from __future__ import annotations
 
 import json

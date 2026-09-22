@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
+# Download TEXMEX ANN benchmark corpora into ./data, matching the paths in
+# config/sift1m.json. Idempotent: skips an already-extracted dataset and reuses
+# an already-downloaded tarball.
+#
 #   scripts/get_data.sh            # SIFT1M only (~168 MB download, ~0.5 GB extracted)
 #   scripts/get_data.sh --gist     # GIST1M only (~2.6 GB download, ~3.6 GB extracted)
 #   scripts/get_data.sh --all      # both
 #
-# Source: http://corpus-texmex.irisa.fr/  (irisa FTP).
+# Source: http://corpus-texmex.irisa.fr/  (irisa FTP). If your network blocks
+# FTP, download the tarballs manually from that page into ./data and re-run --
+# the script will skip the download and just extract.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

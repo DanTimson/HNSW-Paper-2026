@@ -1,60 +1,60 @@
 #!/usr/bin/env python3
-"""
-Measure graph structure of merged / built HNSW graphs:
-  - out-degree distribution at level 0 (mean / median / max / fraction at the M0 cap)
-  - connected components (union-find over level-0 edges, treated as undirected)
+"""Analyse level-0 graph structure from dump_graph_level0 CSVs.
 
-INPUT: one adjacency dump per graph, produced by scripts/dump_graph_level0.cpp
-(dropped into the HNSWMerger backend). Format, one node per line:
-    # cap=<maxM0>            (optional comment; default 32 for M=16)
-    <node_id> <deg> <nbr1> <nbr2> ...
-Node ids are the backend's internal ids (0..n-1). Lines starting with '#' are comments.
+Consumes one or more `node_id,degree,neighbours` CSVs (as emitted by
+dump_graph_level0.cpp) and reports, per graph:
 
-USAGE:
+  * out-degree distribution — mean / median / max / fraction at the m0 cap
+  * connectivity — number of weakly-connected components (union-find over
+    the undirected support of the edge set) and the largest component's share
+
+Writes:
+  * degree_distribution.png / .pdf — overlaid degree histograms across graphs
+  * graph_structure.csv            — one summary row per graph
+
+Build density differs between the reference heuristic (which back-fills
+neighbour lists to the M0 cap, ~32.0) and hnswlib (which keeps only
+diversity-surviving neighbours, mean degree ~21 at maxM0=32); pass
+--ref-density 32.0 to draw that reference line and report the gap. This is
+also the direct measurement behind the density comparison between
+TWO_MERGE/HNSWMerger, ES, and INSERT merged graphs, rather than reasoning
+from query time alone.
+
     python scripts/graph_structure.py \
-        --dumps IGTM-2:igtm.txt TWO_MERGE-2:twomerge.txt INSERT:insert.txt \
-        --out docs/figures/sift1m --dataset sift1m --cap 32
-
-Produces  <out>/degree_distribution.png  and  <out>/graph_structure.csv .
+        --csv c_leaf.csv c_insert.csv c_igtm.csv \
+        --labels leaf INSERT IGTM \
+        --ref-density 32.0 \
+        --out docs/figures/structure
 """
-import argparse, csv, os, sys
-from collections import defaultdict
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 
 
-def load_dump(path):
-    """Return (adjacency dict id->list[int], cap_or_None)."""
-    adj = {}
-    cap = None
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+def load_csv(path):
+    """Return (degrees: np.ndarray[int], adjacency: list[list[int]])."""
+    degrees, adj = [], []
+    with open(path, newline="") as f:
+        r = csv.reader(f)
+        header = next(r, None)
+        for row in r:
+            if not row:
                 continue
-            if line.startswith("#"):
-                if "cap=" in line:
-                    try:
-                        cap = int(line.split("cap=")[1].split()[0])
-                    except ValueError:
-                        pass
-                continue
-            parts = line.split()
-            nid = int(parts[0])
-            # tolerate both "<id> <deg> <nbrs...>" and "<id> <nbrs...>"
-            rest = parts[1:]
-            if rest and len(rest) >= 1:
-                # detect whether parts[1] is a degree count matching remaining length
-                maybe_deg = int(rest[0])
-                if maybe_deg == len(rest) - 1:
-                    nbrs = [int(x) for x in rest[1:]]
-                else:
-                    nbrs = [int(x) for x in rest]
-            else:
-                nbrs = []
-            adj[nid] = nbrs
-    return adj, cap
+            deg = int(row[1])
+            neigh = [int(x) for x in row[2].split()] if len(row) > 2 and row[2] else []
+            degrees.append(deg)
+            adj.append(neigh)
+    return np.array(degrees, dtype=np.int64), adj
 
 
-class UnionFind:
+class UF:
     def __init__(self, n):
         self.p = list(range(n))
         self.r = [0] * n
@@ -76,106 +76,117 @@ class UnionFind:
             self.r[ra] += 1
 
 
-def analyze(adj, cap):
-    n = (max(adj) + 1) if adj else 0
-    degs = [len(adj.get(i, [])) for i in range(n)]
-    mean = sum(degs) / n if n else 0.0
-    sdegs = sorted(degs)
-    median = sdegs[n // 2] if n else 0
-    mx = max(degs) if degs else 0
-    cap = cap or (mx if mx else 1)
-    frac_at_cap = sum(1 for d in degs if d >= cap) / n if n else 0.0
-    # undirected connectivity over level-0 edges
-    uf = UnionFind(n)
-    for i in range(n):
-        for j in adj.get(i, []):
-            if 0 <= j < n:
+def connectivity(adj):
+    """Weakly-connected components over the undirected support of the edges."""
+    n = len(adj)
+    uf = UF(n)
+    for i, neigh in enumerate(adj):
+        for j in neigh:
+            if 0 <= j < n:          # guard against ids outside this dump
                 uf.union(i, j)
-    comp = defaultdict(int)
+    roots = {}
     for i in range(n):
-        comp[uf.find(i)] += 1
-    sizes = sorted(comp.values(), reverse=True)
+        roots[uf.find(i)] = roots.get(uf.find(i), 0) + 1
+    ncomp = len(roots)
+    largest = max(roots.values()) if roots else 0
+    return ncomp, largest
+
+
+def analyse(path, label, maxM0):
+    degrees, adj = load_csv(path)
+    n = len(degrees)
+    cap = maxM0 or int(degrees.max())
+    at_cap = int((degrees >= cap).sum())
+    ncomp, largest = connectivity(adj)
     return {
-        "n": n,
-        "mean_degree": round(mean, 3),
-        "median_degree": median,
-        "max_degree": mx,
+        "label": label,
+        "path": os.path.basename(path),
+        "nodes": n,
+        "mean_degree": float(degrees.mean()),
+        "median_degree": int(np.median(degrees)),
+        "min_degree": int(degrees.min()),
+        "max_degree": int(degrees.max()),
         "cap": cap,
-        "frac_at_cap": round(frac_at_cap, 4),
-        "n_components": len(sizes),
-        "largest_cc_frac": round(sizes[0] / n, 4) if n else 0.0,
-        "singletons": sum(1 for s in sizes if s == 1),
-        "_degs": degs,
+        "frac_at_cap": at_cap / n if n else 0.0,
+        "components": ncomp,
+        "largest_component_frac": largest / n if n else 0.0,
+        "_degrees": degrees,
     }
 
 
-def main():
+def fig_degree_hist(summaries, out, ref_density=None):
+    fig, ax = plt.subplots(figsize=(7.6, 4.6))
+    colors = ["#2e86de", "#16a085", "#d1495b", "#8e44ad", "#e67e22", "#7f8c8d"]
+    maxdeg = max(int(s["_degrees"].max()) for s in summaries)
+    bins = np.arange(0, maxdeg + 2) - 0.5
+    for i, s in enumerate(summaries):
+        ax.hist(s["_degrees"], bins=bins, density=True, histtype="step",
+                linewidth=1.8, color=colors[i % len(colors)],
+                label=f"{s['label']} (mean {s['mean_degree']:.1f})")
+    if ref_density:
+        ax.axvline(ref_density, ls="--", color="#555", lw=1.4, alpha=0.8,
+                   label=f"Python ref (back-filled, {ref_density:.0f})")
+    ax.set_xlabel("out-degree at level 0")
+    ax.set_ylabel("fraction of nodes")
+    ax.set_title("Level-0 out-degree distribution")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.25)
+    ax.set_axisbelow(True)
+    os.makedirs(out, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(os.path.join(out, f"degree_distribution.{ext}"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote degree_distribution.png / .pdf")
+
+
+def write_summary(summaries, out):
+    os.makedirs(out, exist_ok=True)
+    cols = ["label", "path", "nodes", "mean_degree", "median_degree",
+            "min_degree", "max_degree", "cap", "frac_at_cap",
+            "components", "largest_component_frac"]
+    p = os.path.join(out, "graph_structure.csv")
+    with open(p, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for s in summaries:
+            w.writerow(s)
+    print(f"  wrote graph_structure.csv")
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dumps", nargs="+", required=True,
-                    help="label:path entries (label optional; defaults to filename)")
-    ap.add_argument("--out", default="docs/figures/sift1m")
-    ap.add_argument("--dataset", default="")
-    ap.add_argument("--cap", type=int, default=None,
-                    help="level-0 max degree maxM0 (default 32 for M=16, else inferred)")
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+    ap.add_argument("--csv", nargs="+", required=True)
+    ap.add_argument("--labels", nargs="+", default=None,
+                    help="one label per csv; defaults to filenames")
+    ap.add_argument("--maxM0", type=int, default=0,
+                    help="degree cap for frac-at-cap; 0 = use each graph's own max")
+    ap.add_argument("--ref-density", type=float, default=None,
+                    help="Python reference mean degree, drawn as a reference line")
+    ap.add_argument("--out", default="docs/figures/structure")
+    a = ap.parse_args(argv)
 
-    results = {}
-    for item in args.dumps:
-        if ":" in item and not item[1:3] == ":\\":
-            label, path = item.split(":", 1)
-        else:
-            label, path = os.path.splitext(os.path.basename(item))[0], item
-        if not os.path.exists(path):
-            print(f"skip (missing): {path}", file=sys.stderr)
-            continue
-        adj, cap = load_dump(path)
-        results[label] = analyze(adj, args.cap or cap or 32)
+    labels = a.labels or [os.path.splitext(os.path.basename(p))[0] for p in a.csv]
+    if len(labels) != len(a.csv):
+        raise SystemExit(f"--labels ({len(labels)}) must match --csv ({len(a.csv)})")
 
-    if not results:
-        print("no dumps loaded; nothing to do", file=sys.stderr)
-        sys.exit(1)
+    summaries = []
+    for path, label in zip(a.csv, labels):
+        s = analyse(path, label, a.maxM0)
+        summaries.append(s)
+        print(f"{label:12} n={s['nodes']:>7}  mean_deg={s['mean_degree']:6.3f}  "
+              f"median={s['median_degree']:>2}  max={s['max_degree']:>2}  "
+              f"at_cap={s['frac_at_cap']*100:5.2f}%  "
+              f"components={s['components']}  largest={s['largest_component_frac']*100:.2f}%")
 
-    # summary csv
-    csv_path = os.path.join(args.out, "graph_structure.csv")
-    cols = ["method", "n", "mean_degree", "median_degree", "max_degree", "cap",
-            "frac_at_cap", "n_components", "largest_cc_frac", "singletons"]
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(cols)
-        for label, r in results.items():
-            w.writerow([label] + [r[c] for c in cols[1:]])
-    print("wrote", csv_path)
-    for label, r in results.items():
-        print(f"  {label:14s} mean_deg={r['mean_degree']:.2f} max={r['max_degree']} "
-              f"frac@cap={r['frac_at_cap']:.3f} components={r['n_components']} "
-              f"largest_cc={r['largest_cc_frac']:.3f}")
+    if a.ref_density:
+        print(f"\nreference (Python, back-filled): mean degree {a.ref_density:.2f}")
+        for s in summaries:
+            gap = a.ref_density - s["mean_degree"]
+            print(f"  {s['label']:12} is {gap:+.2f} vs reference "
+                  f"({s['mean_degree']/a.ref_density*100:.1f}% of its density)")
 
-    # figure: degree histograms (overlaid)
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(7, 4.2))
-        cap = max(r["cap"] for r in results.values())
-        bins = range(0, cap + 2)
-        for label, r in results.items():
-            ax.hist(r["_degs"], bins=bins, histtype="step", linewidth=1.8,
-                    density=True, label=f"{label} (mean {r['mean_degree']:.1f})")
-        ax.set_xlabel("out-degree at level 0")
-        ax.set_ylabel("fraction of nodes")
-        title = "Level-0 out-degree distribution"
-        if args.dataset:
-            title += f" ({args.dataset.upper()})"
-        ax.set_title(title)
-        ax.legend()
-        fig.tight_layout()
-        png = os.path.join(args.out, "degree_distribution.png")
-        fig.savefig(png, dpi=150)
-        fig.savefig(png.replace(".png", ".pdf"))
-        print("wrote", png)
-    except Exception as e:  # noqa
-        print("plot skipped:", e, file=sys.stderr)
+    fig_degree_hist(summaries, a.out, a.ref_density)
+    write_summary(summaries, a.out)
 
 
 if __name__ == "__main__":

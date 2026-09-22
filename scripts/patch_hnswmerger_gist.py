@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""
-Add a GIST1M workload to a HNSWMerger's test_config.h
+"""Add a GIST1M workload to a cloned HNSWMerger's test_config.h (idempotent).
+
+HNSWMerger ships SIFT/DEEP/TURING workloads only; GIST needs four small edits to
+WorkloadType, its parser, its to-string, and setDefaultsByWorkload. This patches
+those in place. Re-running is a no-op once GIST1M is present.
 
     python scripts/patch_hnswmerger_gist.py /path/to/HNSWMerger/HNSW-Merger/test_config.h
 
@@ -17,19 +20,19 @@ def patch(path: str) -> None:
         return
     orig = src
 
-    # enum WorkloadType { SIFT1M, ... }  -> add GIST1M after SIFT1M
+    # 1) enum WorkloadType { SIFT1M, ... }  -> add GIST1M after SIFT1M
     src = re.sub(r"(enum\s+WorkloadType\s*\{\s*\n\s*SIFT1M,\s*\n)",
                  r"\1    GIST1M,\n", src, count=1)
 
-    # parseWorkloadType: add a branch
+    # 2) parseWorkloadType: add a branch
     src = re.sub(r'(WorkloadType\s+parseWorkloadType[^\{]*\{\s*\n)',
                  r'\1    if (s == "GIST1M") return GIST1M;\n', src, count=1)
 
-    # workloadTypeToString: add a case
+    # 3) workloadTypeToString: add a case
     src = re.sub(r'(std::string\s+workloadTypeToString[^\{]*\{\s*\n\s*switch\s*\([^\)]*\)\s*\{\s*\n)',
                  r'\1    case GIST1M: return "GIST1M";\n', src, count=1)
 
-    # setDefaultsByWorkload: add a case block (dim 960; GIST has 1000 queries)
+    # 4) setDefaultsByWorkload: add a case block (dim 960; GIST has 1000 queries)
     src = re.sub(r'(void\s+setDefaultsByWorkload[^\{]*\{\s*\n\s*switch\s*\([^\)]*\)\s*\{\s*\n)',
                  r'\1    case GIST1M:\n'
                  r'        cfg.dim = 960;\n'
